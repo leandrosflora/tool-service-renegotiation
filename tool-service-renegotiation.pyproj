@@ -4,7 +4,7 @@
     <SchemaVersion>2.0</SchemaVersion>
     <ProjectGuid>c611ba73-fb6d-4758-88ea-c17275d1e259</ProjectGuid>
     <ProjectHome>.</ProjectHome>
-    <StartupFile>tool_service_renegotiation.py</StartupFile>
+    <StartupFile>app\main.py</StartupFile>
     <SearchPath>
     </SearchPath>
     <WorkingDirectory>.</WorkingDirectory>
@@ -21,7 +21,29 @@
     <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="tool_service_renegotiation.py" />
+    <Compile Include="app\__init__.py" />
+    <Compile Include="app\main.py" />
+    <Compile Include="app\config.py" />
+    <Compile Include="app\logging_setup.py" />
+    <Compile Include="app\mcp_server.py" />
+    <Compile Include="app\renegotiation_client.py" />
+    <Compile Include="app\events\__init__.py" />
+    <Compile Include="app\events\publisher.py" />
+    <Compile Include="app\events\instrumentation.py" />
+    <Compile Include="tests\test_renegotiation_client.py" />
+    <Compile Include="tests\test_tools.py" />
+    <Compile Include="tests\test_mcp_server_integration.py" />
+    <Compile Include="tests\test_publisher.py" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="requirements.txt" />
+    <Content Include="requirements-dev.txt" />
+    <Content Include="pyproject.toml" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="app\" />
+    <Folder Include="app\events\" />
+    <Folder Include="tests\" />
   </ItemGroup>
   <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
   <!-- Uncomment the CoreCompile target to enable the Build command in

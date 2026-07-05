@@ -1,0 +1,107 @@
+import pytest
+import respx
+from httpx import Response
+
+from app.renegotiation_client import RenegotiationServiceClient, RenegotiationServiceUnavailableError
+
+BASE_URL = "http://renegotiation.test"
+
+
+def make_client(retry_attempts: int = 1) -> RenegotiationServiceClient:
+    return RenegotiationServiceClient(base_url=BASE_URL, retry_attempts=retry_attempts)
+
+
+@respx.mock
+async def test_get_client_success():
+    respx.get(f"{BASE_URL}/clients/12345678900").mock(
+        return_value=Response(200, json={"name": "Maria"})
+    )
+
+    result = await make_client().get_client("12345678900")
+
+    assert result == {"name": "Maria"}
+
+
+@respx.mock
+async def test_get_contracts_success():
+    respx.get(f"{BASE_URL}/clients/client-1/contracts").mock(
+        return_value=Response(200, json={"contracts": ["c1", "c2"]})
+    )
+
+    result = await make_client().get_contracts("client-1")
+
+    assert result == {"contracts": ["c1", "c2"]}
+
+
+@respx.mock
+async def test_get_debts_success():
+    respx.get(f"{BASE_URL}/contracts/contract-1/debts").mock(
+        return_value=Response(200, json={"debts": [{"amount": 100}]})
+    )
+
+    result = await make_client().get_debts("contract-1")
+
+    assert result == {"debts": [{"amount": 100}]}
+
+
+@respx.mock
+async def test_check_eligibility_success():
+    respx.get(f"{BASE_URL}/contracts/contract-1/eligibility").mock(
+        return_value=Response(200, json={"eligible": True})
+    )
+
+    result = await make_client().check_eligibility("contract-1")
+
+    assert result == {"eligible": True}
+
+
+@respx.mock
+async def test_simulate_proposal_success():
+    respx.post(f"{BASE_URL}/contracts/contract-1/simulations").mock(
+        return_value=Response(200, json={"simulation_id": "sim-1"})
+    )
+
+    result = await make_client().simulate_proposal("contract-1", {"installments": 12})
+
+    assert result == {"simulation_id": "sim-1"}
+
+
+@respx.mock
+async def test_confirm_agreement_success():
+    respx.post(f"{BASE_URL}/simulations/sim-1/confirmations").mock(
+        return_value=Response(200, json={"agreement_id": "agr-1"})
+    )
+
+    result = await make_client().confirm_agreement("sim-1")
+
+    assert result == {"agreement_id": "agr-1"}
+
+
+@respx.mock
+async def test_get_document_success():
+    respx.get(f"{BASE_URL}/agreements/agr-1/document").mock(
+        return_value=Response(200, json={"document_url": "http://docs/agr-1.pdf"})
+    )
+
+    result = await make_client().get_document("agr-1")
+
+    assert result == {"document_url": "http://docs/agr-1.pdf"}
+
+
+@respx.mock
+async def test_transient_failure_then_success_recovers_on_retry():
+    route = respx.get(f"{BASE_URL}/clients/12345678900")
+    route.side_effect = [Response(503), Response(200, json={"name": "Maria"})]
+
+    result = await make_client(retry_attempts=2).get_client("12345678900")
+
+    assert result == {"name": "Maria"}
+    assert route.call_count == 2
+
+
+@respx.mock
+async def test_persistent_failure_raises_unavailable_error():
+    respx.get(f"{BASE_URL}/clients/12345678900").mock(return_value=Response(503))
+
+    with pytest.raises(RenegotiationServiceUnavailableError):
+        await make_client(retry_attempts=1).get_client("12345678900")
