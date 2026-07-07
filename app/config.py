@@ -10,7 +10,10 @@ class Settings(BaseSettings):
     renegotiation_service_base_url: str = "http://localhost:9400"
     renegotiation_service_retry_attempts: int = 2
 
-    kafka_bootstrap_servers: str = "localhost:9092"
+    # 9092 is Kafka's PLAINTEXT listener, advertised as "kafka:9092" (only resolvable inside
+    # the Docker network); 29092 is the EXTERNAL listener, advertised as "localhost:29092",
+    # for this service running on the host (e.g. via `python -m app.main` outside Docker).
+    kafka_bootstrap_servers: str = "localhost:29092"
     kafka_tool_events_topic: str = "tool.executed"
 
 
