@@ -136,6 +136,7 @@ O serviço usa `pydantic-settings` com variáveis de ambiente.
 |---|---:|---|
 | `MCP_HOST` | `0.0.0.0` | Host onde o servidor MCP será exposto. |
 | `MCP_PORT` | `8400` | Porta do servidor MCP. |
+| `DOCS_PORT` | `8401` | Porta da fachada REST/Swagger somente para documentação (ver seção abaixo). |
 | `RENEGOTIATION_SERVICE_BASE_URL` | `http://localhost:9400` | Base URL do serviço core de renegociação. |
 | `RENEGOTIATION_SERVICE_RETRY_ATTEMPTS` | `2` | Tentativas adicionais em chamadas ao serviço de renegociação. |
 | `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Bootstrap servers do Kafka. |
@@ -201,6 +202,14 @@ O servidor sobe em:
 ```text
 http://localhost:8400/mcp
 ```
+
+O mesmo processo também sobe, na porta `DOCS_PORT` (default `8401`), uma **fachada REST somente para documentação** (`app/rest_api.py`) espelhando as mesmas 7 tools via Swagger UI:
+
+```text
+http://localhost:8401/docs
+```
+
+MCP não tem uma superfície OpenAPI própria — é um protocolo JSON-RPC-like sobre streamable-HTTP, não REST. Essa fachada existe só para permitir explorar/testar as tools com uma UI; nenhum cliente do workspace a consome (`agent-runtime-renegotiation` fala MCP em `:8400/mcp`, não REST).
 
 ## Testes
 

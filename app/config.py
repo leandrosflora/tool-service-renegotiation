@@ -7,6 +7,10 @@ class Settings(BaseSettings):
     mcp_host: str = "0.0.0.0"
     mcp_port: int = 8400
 
+    # Documentation-only REST/Swagger facade over the same seven tools (see app/rest_api.py).
+    # agent-runtime-renegotiation talks to this service over MCP (mcp_port), never over this port.
+    docs_port: int = 8401
+
     renegotiation_service_base_url: str = "http://localhost:9400"
     renegotiation_service_retry_attempts: int = 2
 
