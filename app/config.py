@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     kafka_bootstrap_servers: str = "localhost:29092"
     kafka_tool_events_topic: str = "tool.executed"
 
+    otel_otlp_endpoint: str = "http://localhost:4317"
+
 
 def get_settings() -> Settings:
     return Settings()
