@@ -5,6 +5,8 @@ confluent-kafka==2.15.0
 pydantic-settings==2.14.2
 uvicorn==0.50.0
 fastapi==0.139.0
+PyJWT==2.10.1
+prometheus-client==0.22.1
 opentelemetry-api==1.43.0
 opentelemetry-sdk==1.43.0
 opentelemetry-exporter-otlp-proto-grpc==1.43.0
