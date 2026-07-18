@@ -6,6 +6,9 @@ from typing import Any, Awaitable, Callable
 import httpx
 from tenacity import retry, stop_after_attempt, wait_fixed
 
+from app.config import Settings
+from app.platform import create_service_token, current_tenant_id
+
 logger = logging.getLogger(__name__)
 
 
@@ -14,15 +17,10 @@ class RenegotiationServiceUnavailableError(Exception):
 
 
 class RenegotiationServiceClient:
-    """HTTP client shared by all seven governed tools.
-
-    Safe GET requests are retried. Mutating POST requests execute once so a timeout after the
-    downstream committed a change cannot trigger a duplicate simulation or agreement.
-    """
-
-    def __init__(self, base_url: str, retry_attempts: int, timeout: float = 5.0) -> None:
-        self._base_url = base_url
-        self._retry_attempts = retry_attempts
+    def __init__(self, settings: Settings, timeout: float = 5.0) -> None:
+        self._settings = settings
+        self._base_url = settings.renegotiation_service_base_url
+        self._retry_attempts = settings.renegotiation_service_retry_attempts
         self._timeout = timeout
 
     async def get_client(self, cpf: str) -> dict[str, Any]:
@@ -41,11 +39,10 @@ class RenegotiationServiceClient:
         return await self._post(f"/contracts/{contract_id}/simulations", params)
 
     async def confirm_agreement(self, simulation_id: str) -> dict[str, Any]:
-        idempotency_key = f"confirm-agreement:{simulation_id}"
         return await self._post(
             f"/simulations/{simulation_id}/confirmations",
             {},
-            idempotency_key=idempotency_key,
+            idempotency_key=f"confirm-agreement:{simulation_id}",
         )
 
     async def get_document(self, agreement_id: str) -> dict[str, Any]:
@@ -67,10 +64,11 @@ class RenegotiationServiceClient:
         body: dict[str, Any],
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
-
+        request_headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
         try:
-            return await self._execute(lambda client: client.post(path, json=body, headers=headers))
+            return await self._execute(
+                lambda client: client.post(path, json=body, headers=request_headers)
+            )
         except Exception as exc:
             self._raise_unavailable(exc, "without retry")
 
@@ -78,15 +76,23 @@ class RenegotiationServiceClient:
         self,
         request_fn: Callable[[httpx.AsyncClient], Awaitable[httpx.Response]],
     ) -> dict[str, Any]:
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout) as client:
+        token = create_service_token(self._settings, self._settings.renegotiation_service_audience)
+        headers = {"Authorization": f"Bearer {token}"}
+        tenant_id = current_tenant_id()
+        if tenant_id:
+            headers["X-Tenant-Id"] = tenant_id
+
+        async with httpx.AsyncClient(
+            base_url=self._base_url,
+            timeout=self._timeout,
+            headers=headers,
+        ) as client:
             response = await request_fn(client)
             response.raise_for_status()
             return response.json()
 
     @staticmethod
     def _raise_unavailable(exc: Exception, retry_context: str) -> None:
-        # Log only the exception type: httpx exception messages may embed request URLs containing
-        # CPF, contract, simulation, or agreement identifiers.
         logger.warning(
             "Renegotiation Service call failed %s (%s)",
             retry_context,
