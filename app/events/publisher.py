@@ -4,8 +4,10 @@ import json
 import logging
 
 from confluent_kafka import Producer
+from opentelemetry.propagate import inject
 
 from app.config import Settings
+from app.platform import current_tenant_id
 
 logger = logging.getLogger(__name__)
 
@@ -21,24 +23,26 @@ def publish_tool_executed_event(
     outcome: str,
     correlation_id: str | None = None,
 ) -> None:
-    """Publishes a tool.executed event keyed by tool name.
-
-    The payload intentionally never includes tool arguments (CPF, contract IDs, etc.)
-    so there is no raw sensitive identifier to leak into the audit trail.
-    Never raises: any failure to enqueue or deliver is logged and swallowed.
-    """
     topic = settings.kafka_tool_events_topic
+    tenant_id = current_tenant_id()
     event = {
+        "tenant_id": tenant_id,
         "tool_name": tool_name,
         "outcome": outcome,
         "correlation_id": correlation_id,
     }
+    trace_carrier: dict[str, str] = {}
+    inject(trace_carrier)
+    headers = [(name, value.encode("utf-8")) for name, value in trace_carrier.items()]
+    if tenant_id:
+        headers.append(("tenant-id", tenant_id.encode("utf-8")))
 
     try:
         producer.produce(
             topic,
             key=tool_name.encode("utf-8"),
             value=json.dumps(event).encode("utf-8"),
+            headers=headers,
             on_delivery=_make_delivery_callback(tool_name, topic),
         )
         producer.poll(0)
