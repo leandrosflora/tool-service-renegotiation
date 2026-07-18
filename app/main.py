@@ -54,7 +54,7 @@ def build_app():
         if settings.internal_auth_enabled and not settings.internal_auth_signing_key:
             failures.append("internal_auth_signing_key_missing")
         try:
-            await asyncio.to_thread(producer.list_topics, 1)
+            await asyncio.to_thread(producer.list_topics, timeout=1)
         except Exception:
             failures.append("kafka_unavailable")
         try:
