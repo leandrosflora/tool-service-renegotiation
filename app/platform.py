@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import re
 import time
+import uuid
 from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
@@ -10,8 +12,22 @@ import jwt
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from starlette.responses import JSONResponse, Response
 
+TENANT_CLAIM = "tenant_id"
 _tenant_id: ContextVar[str | None] = ContextVar("tenant_id", default=None)
 _caller_service: ContextVar[str | None] = ContextVar("caller_service", default=None)
+_execution_context: ContextVar[ToolExecutionContext | None] = ContextVar("execution_context", default=None)
+
+
+@dataclass(frozen=True)
+class ToolExecutionContext:
+    tenant_id: str
+    caller_service: str
+    conversation_id: str
+    message_id: str
+    journey_stage: str
+    journey_version: int
+    confirmation_message_id: str | None
+
 
 HTTP_REQUESTS = Counter(
     "platform_http_requests_total",
@@ -30,9 +46,20 @@ AUTH_FAILURES = Counter(
 )
 
 
-def create_service_token(settings: Any, audience: str) -> str:
+def normalize_tenant_id(value: str | None) -> str:
+    try:
+        parsed = uuid.UUID((value or "").strip())
+    except (ValueError, AttributeError) as exc:
+        raise ValueError("Tenant ID must be a UUID") from exc
+    if parsed.int == 0:
+        raise ValueError("Tenant ID cannot be empty UUID")
+    return str(parsed)
+
+
+def create_service_token(settings: Any, audience: str, tenant_id: str) -> str:
     if settings.internal_auth_enabled and not settings.internal_auth_signing_key:
         raise RuntimeError("INTERNAL_AUTH_SIGNING_KEY is required when internal auth is enabled")
+    canonical_tenant = normalize_tenant_id(tenant_id)
     now = datetime.now(timezone.utc)
     return jwt.encode(
         {
@@ -41,14 +68,26 @@ def create_service_token(settings: Any, audience: str) -> str:
             "aud": audience,
             "iat": now,
             "exp": now + timedelta(seconds=settings.internal_auth_token_ttl_seconds),
+            "jti": uuid.uuid4().hex,
+            TENANT_CLAIM: canonical_tenant,
         },
         settings.internal_auth_signing_key,
         algorithm="HS256",
     )
 
 
-def current_tenant_id() -> str | None:
-    return _tenant_id.get()
+def current_tenant_id() -> str:
+    tenant_id = _tenant_id.get()
+    if not tenant_id:
+        raise RuntimeError("Tenant context is not available")
+    return tenant_id
+
+
+def current_execution_context() -> ToolExecutionContext:
+    context = _execution_context.get()
+    if context is None:
+        raise RuntimeError("Signed tool execution context is not available")
+    return context
 
 
 def metrics_response() -> Response:
@@ -81,6 +120,7 @@ class PlatformMiddleware:
         status_code = 500
         tenant_token = None
         caller_token = None
+        execution_token = None
 
         async def capture_status(message) -> None:
             nonlocal status_code
@@ -93,26 +133,57 @@ class PlatformMiddleware:
                 key.decode("latin-1").lower(): value.decode("latin-1")
                 for key, value in scope.get("headers", [])
             }
+            claims: dict[str, Any] | None = None
             if not _matches(path, self.public_paths):
                 auth_result = self._authenticate(headers.get("authorization"))
                 if isinstance(auth_result, JSONResponse):
                     status_code = auth_result.status_code
                     await auth_result(scope, receive, send)
                     return
-                caller_token = _caller_service.set(auth_result)
+                claims = auth_result
+                caller_token = _caller_service.set(str(claims.get("sub", "auth-disabled")))
 
-            tenant_id = headers.get("x-tenant-id")
-            if tenant_id:
-                tenant_token = _tenant_id.set(tenant_id)
-            if _matches(path, self.tenant_required_paths) and not tenant_id:
-                status_code = 400
-                await JSONResponse({"detail": "X-Tenant-Id header is required."}, status_code=400)(
-                    scope, receive, send
-                )
-                return
+            if _matches(path, self.tenant_required_paths):
+                try:
+                    header_tenant = normalize_tenant_id(headers.get("x-tenant-id"))
+                except ValueError:
+                    status_code = 400
+                    await JSONResponse(
+                        {"detail": "X-Tenant-Id must be a non-empty UUID."},
+                        status_code=400,
+                    )(scope, receive, send)
+                    return
+
+                if self.settings.internal_auth_enabled:
+                    try:
+                        claim_tenant = normalize_tenant_id((claims or {}).get(TENANT_CLAIM))
+                    except ValueError:
+                        status_code = 403
+                        await JSONResponse(
+                            {"detail": "Signed tenant_id claim is required."},
+                            status_code=403,
+                        )(scope, receive, send)
+                        return
+                    if claim_tenant != header_tenant:
+                        status_code = 403
+                        await JSONResponse(
+                            {"detail": "X-Tenant-Id does not match signed tenant_id claim."},
+                            status_code=403,
+                        )(scope, receive, send)
+                        return
+                    try:
+                        execution_context = _parse_execution_context(claims or {}, claim_tenant)
+                    except ValueError as exc:
+                        status_code = 403
+                        await JSONResponse({"detail": str(exc)}, status_code=403)(scope, receive, send)
+                        return
+                    execution_token = _execution_context.set(execution_context)
+                tenant_token = _tenant_id.set(header_tenant)
 
             await self.app(scope, receive, capture_status)
         finally:
+            if execution_token is not None:
+                _execution_context.reset(execution_token)
             if tenant_token is not None:
                 _tenant_id.reset(tenant_token)
             if caller_token is not None:
@@ -129,16 +200,15 @@ class PlatformMiddleware:
                 normalized_path,
             ).observe(time.perf_counter() - started)
 
-    def _authenticate(self, authorization: str | None) -> str | JSONResponse:
+    def _authenticate(self, authorization: str | None) -> dict[str, Any] | JSONResponse:
         if not self.settings.internal_auth_enabled:
-            return "auth-disabled"
+            return {"sub": "auth-disabled", "token_use": "tool_execution"}
         if not self.settings.internal_auth_signing_key:
             AUTH_FAILURES.labels(self.settings.internal_auth_service_name, "server_misconfigured").inc()
             return JSONResponse({"detail": "Internal authentication is not configured."}, status_code=503)
         if not authorization or not authorization.startswith("Bearer "):
             AUTH_FAILURES.labels(self.settings.internal_auth_service_name, "missing_token").inc()
             return JSONResponse({"detail": "Missing bearer token."}, status_code=401)
-
         try:
             claims = jwt.decode(
                 authorization.removeprefix("Bearer ").strip(),
@@ -146,7 +216,7 @@ class PlatformMiddleware:
                 algorithms=["HS256"],
                 audience=self.settings.internal_auth_service_name,
                 issuer=self.settings.internal_auth_issuer,
-                options={"require": ["exp", "iat", "iss", "aud", "sub"]},
+                options={"require": ["exp", "iat", "iss", "aud", "sub", TENANT_CLAIM]},
             )
         except jwt.ExpiredSignatureError:
             AUTH_FAILURES.labels(self.settings.internal_auth_service_name, "expired_token").inc()
@@ -154,12 +224,33 @@ class PlatformMiddleware:
         except jwt.PyJWTError:
             AUTH_FAILURES.labels(self.settings.internal_auth_service_name, "invalid_token").inc()
             return JSONResponse({"detail": "Invalid bearer token."}, status_code=401)
+        return claims
 
-        caller = claims.get("sub")
-        if not isinstance(caller, str) or not caller:
-            AUTH_FAILURES.labels(self.settings.internal_auth_service_name, "missing_subject").inc()
-            return JSONResponse({"detail": "Token subject is required."}, status_code=401)
-        return caller
+
+def _parse_execution_context(claims: dict[str, Any], tenant_id: str) -> ToolExecutionContext:
+    if claims.get("token_use") != "tool_execution":
+        raise ValueError("tool_execution token is required for governed tools.")
+    caller = claims.get("sub")
+    conversation_id = claims.get("conversation_id")
+    message_id = claims.get("message_id")
+    journey_stage = claims.get("journey_stage")
+    journey_version = claims.get("journey_version")
+    if not all(isinstance(value, str) and value for value in (caller, conversation_id, message_id, journey_stage)):
+        raise ValueError("Signed conversation, message, stage, and caller claims are required.")
+    if not isinstance(journey_version, int) or journey_version < 0:
+        raise ValueError("Signed journey_version must be a non-negative integer.")
+    confirmation_message_id = claims.get("confirmation_message_id")
+    if confirmation_message_id is not None and not isinstance(confirmation_message_id, str):
+        raise ValueError("confirmation_message_id claim is invalid.")
+    return ToolExecutionContext(
+        tenant_id=tenant_id,
+        caller_service=caller,
+        conversation_id=conversation_id,
+        message_id=message_id,
+        journey_stage=journey_stage,
+        journey_version=journey_version,
+        confirmation_message_id=confirmation_message_id,
+    )
 
 
 def _matches(path: str, prefixes: tuple[str, ...]) -> bool:
