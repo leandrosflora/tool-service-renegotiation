@@ -35,14 +35,31 @@ class RenegotiationServiceClient:
     async def check_eligibility(self, contract_id: str) -> dict[str, Any]:
         return await self._get(f"/contracts/{contract_id}/eligibility")
 
-    async def simulate_proposal(self, contract_id: str, params: dict[str, Any]) -> dict[str, Any]:
-        return await self._post(f"/contracts/{contract_id}/simulations", params)
+    async def simulate_proposal(
+        self,
+        contract_id: str,
+        params: dict[str, Any],
+        idempotency_key: str | None,
+    ) -> dict[str, Any]:
+        if not idempotency_key:
+            raise ValueError("A policy-derived idempotency key is required for simulation.")
+        return await self._post(
+            f"/contracts/{contract_id}/simulations",
+            params,
+            idempotency_key=idempotency_key,
+        )
 
-    async def confirm_agreement(self, simulation_id: str) -> dict[str, Any]:
+    async def confirm_agreement(
+        self,
+        simulation_id: str,
+        idempotency_key: str | None,
+    ) -> dict[str, Any]:
+        if not idempotency_key:
+            raise ValueError("Explicit confirmation idempotency key is required.")
         return await self._post(
             f"/simulations/{simulation_id}/confirmations",
             {},
-            idempotency_key=f"confirm-agreement:{simulation_id}",
+            idempotency_key=idempotency_key,
         )
 
     async def get_document(self, agreement_id: str) -> dict[str, Any]:
@@ -62,12 +79,15 @@ class RenegotiationServiceClient:
         self,
         path: str,
         body: dict[str, Any],
-        idempotency_key: str | None = None,
+        idempotency_key: str,
     ) -> dict[str, Any]:
-        request_headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
         try:
             return await self._execute(
-                lambda client: client.post(path, json=body, headers=request_headers)
+                lambda client: client.post(
+                    path,
+                    json=body,
+                    headers={"Idempotency-Key": idempotency_key},
+                )
             )
         except Exception as exc:
             self._raise_unavailable(exc, "without retry")
@@ -76,11 +96,16 @@ class RenegotiationServiceClient:
         self,
         request_fn: Callable[[httpx.AsyncClient], Awaitable[httpx.Response]],
     ) -> dict[str, Any]:
-        token = create_service_token(self._settings, self._settings.renegotiation_service_audience)
-        headers = {"Authorization": f"Bearer {token}"}
         tenant_id = current_tenant_id()
-        if tenant_id:
-            headers["X-Tenant-Id"] = tenant_id
+        token = create_service_token(
+            self._settings,
+            self._settings.renegotiation_service_audience,
+            tenant_id,
+        )
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-Tenant-Id": tenant_id,
+        }
 
         async with httpx.AsyncClient(
             base_url=self._base_url,
