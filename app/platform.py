@@ -6,7 +6,7 @@ import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 import jwt
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
@@ -56,21 +56,31 @@ def normalize_tenant_id(value: str | None) -> str:
     return str(parsed)
 
 
-def create_service_token(settings: Any, audience: str, tenant_id: str) -> str:
+def create_service_token(
+    settings: Any,
+    audience: str,
+    tenant_id: str,
+    extra_claims: Mapping[str, Any] | None = None,
+) -> str:
     if settings.internal_auth_enabled and not settings.internal_auth_signing_key:
         raise RuntimeError("INTERNAL_AUTH_SIGNING_KEY is required when internal auth is enabled")
     canonical_tenant = normalize_tenant_id(tenant_id)
     now = datetime.now(timezone.utc)
+    payload: dict[str, Any] = {
+        "iss": settings.internal_auth_issuer,
+        "sub": settings.internal_auth_service_name,
+        "aud": audience,
+        "iat": now,
+        "exp": now + timedelta(seconds=settings.internal_auth_token_ttl_seconds),
+        "jti": uuid.uuid4().hex,
+        TENANT_CLAIM: canonical_tenant,
+    }
+    reserved = {"iss", "sub", "aud", "iat", "exp", "jti", TENANT_CLAIM}
+    for name, value in (extra_claims or {}).items():
+        if name not in reserved and value is not None:
+            payload[name] = value
     return jwt.encode(
-        {
-            "iss": settings.internal_auth_issuer,
-            "sub": settings.internal_auth_service_name,
-            "aud": audience,
-            "iat": now,
-            "exp": now + timedelta(seconds=settings.internal_auth_token_ttl_seconds),
-            "jti": uuid.uuid4().hex,
-            TENANT_CLAIM: canonical_tenant,
-        },
+        payload,
         settings.internal_auth_signing_key,
         algorithm="HS256",
     )
