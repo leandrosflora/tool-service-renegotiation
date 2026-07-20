@@ -68,6 +68,36 @@ def test_confirmation_is_denied_from_wrong_stage(monkeypatch: pytest.MonkeyPatch
         policy.authorize_tool("confirmar_acordo", {"simulation_id": "simulation-1"})
 
 
+def test_consultar_contratos_is_allowed_in_same_turn_as_identification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # journey_stage is signed once at the start of the agent turn and never advances mid-turn,
+    # so a turn that just identified the customer via consultar_cliente is still signed with
+    # IdentificationPending when it immediately calls consultar_contratos next.
+    monkeypatch.setattr(
+        policy,
+        "current_execution_context",
+        lambda: _context(stage="IdentificationPending"),
+    )
+
+    decision = policy.authorize_tool("consultar_contratos", {"client_id": "client-1"})
+
+    assert decision.context.journey_stage == "IdentificationPending"
+
+
+def test_consultar_contratos_is_denied_before_identification_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        policy,
+        "current_execution_context",
+        lambda: _context(stage="Started"),
+    )
+
+    with pytest.raises(policy.ToolPolicyDeniedError, match="not allowed"):
+        policy.authorize_tool("consultar_contratos", {"client_id": "client-1"})
+
+
 def test_simulation_key_is_deterministic(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         policy,

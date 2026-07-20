@@ -27,6 +27,16 @@ READ_TOOL_STAGES: dict[str, set[str]] = {
         "ConfirmationPending",
     },
     "consultar_contratos": {
+        # IdentificationPending is included alongside CustomerIdentified onward because the
+        # journey_stage claim is signed once per agent turn (see agent-runtime-renegotiation's
+        # tool_service.py) and never advances mid-turn - the orchestrator only persists the
+        # CustomerIdentified transition after the whole turn completes. Without it, the natural
+        # same-turn chain "consultar_cliente identifies them -> consultar_contratos lists their
+        # contracts" is always denied on the second call, since the stage at signing time still
+        # reflects the turn's start. consultar_contratos itself requires a client_id that can
+        # only come from a consultar_cliente call already made from this stage, so this doesn't
+        # weaken the identification requirement - it just lets both calls land in one turn.
+        "IdentificationPending",
         "CustomerIdentified",
         "ContractSelectionPending",
         "ContractSelected",

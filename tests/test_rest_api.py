@@ -1,10 +1,11 @@
 from unittest.mock import MagicMock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.rest_api import create_rest_api
-from tests.test_tools import FakeClient
+from tests.test_tools import FakeClient, authorize
 
 
 def make_client(fake: FakeClient) -> TestClient:
@@ -37,7 +38,8 @@ def test_openapi_schema_lists_all_seven_operations():
     }
 
 
-def test_consultar_cliente_success():
+def test_consultar_cliente_success(monkeypatch: pytest.MonkeyPatch):
+    authorize(monkeypatch, journey_stage="CustomerIdentified")
     client = make_client(FakeClient(responses={"get_client": {"name": "Maria"}}))
 
     response = client.get("/clients/12345678900")
@@ -46,7 +48,8 @@ def test_consultar_cliente_success():
     assert response.json() == {"name": "Maria"}
 
 
-def test_simular_proposta_success():
+def test_simular_proposta_success(monkeypatch: pytest.MonkeyPatch):
+    authorize(monkeypatch, journey_stage="ContractSelected")
     client = make_client(FakeClient(responses={"simulate_proposal": {"simulation_id": "sim-1"}}))
 
     response = client.post("/contracts/contract-1/simulations", json={"installments": 12})

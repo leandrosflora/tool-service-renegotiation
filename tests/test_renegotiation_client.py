@@ -2,13 +2,41 @@ import pytest
 import respx
 from httpx import Response
 
+from app.config import Settings
 from app.renegotiation_client import RenegotiationServiceClient, RenegotiationServiceUnavailableError
+from app.platform import ToolExecutionContext
 
 BASE_URL = "http://renegotiation.test"
+TENANT_ID = "00000000-0000-0000-0000-000000000001"
 
 
 def make_client(retry_attempts: int = 1) -> RenegotiationServiceClient:
-    return RenegotiationServiceClient(base_url=BASE_URL, retry_attempts=retry_attempts)
+    settings = Settings(
+        renegotiation_service_base_url=BASE_URL,
+        renegotiation_service_retry_attempts=retry_attempts,
+        internal_auth_signing_key="test-only-internal-auth-signing-key-32-bytes-min",
+    )
+    return RenegotiationServiceClient(settings)
+
+
+def _context(*, journey_stage: str = "CustomerIdentified") -> ToolExecutionContext:
+    return ToolExecutionContext(
+        tenant_id=TENANT_ID,
+        caller_service="agent-runtime-renegotiation",
+        conversation_id="conversation-1",
+        message_id="wamid-1",
+        journey_stage=journey_stage,
+        journey_version=0,
+        confirmation_message_id=None,
+    )
+
+
+@pytest.fixture(autouse=True)
+def execution_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.renegotiation_client as module
+
+    monkeypatch.setattr(module, "current_tenant_id", lambda: TENANT_ID)
+    monkeypatch.setattr(module, "current_execution_context", _context)
 
 
 @respx.mock
@@ -61,7 +89,9 @@ async def test_simulate_proposal_success():
         return_value=Response(200, json={"simulation_id": "sim-1"})
     )
 
-    result = await make_client().simulate_proposal("contract-1", {"installments": 12})
+    result = await make_client().simulate_proposal(
+        "contract-1", {"installments": 12}, "idem-simulate-1"
+    )
 
     assert result == {"simulation_id": "sim-1"}
 
@@ -72,7 +102,7 @@ async def test_confirm_agreement_success():
         return_value=Response(200, json={"agreement_id": "agr-1"})
     )
 
-    result = await make_client().confirm_agreement("sim-1")
+    result = await make_client().confirm_agreement("sim-1", "idem-confirm-1")
 
     assert result == {"agreement_id": "agr-1"}
 
