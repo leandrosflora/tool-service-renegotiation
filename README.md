@@ -15,23 +15,42 @@ flowchart LR
 
 ## Stack
 
-- Python 3.9+
+- Python 3.12
 - MCP / FastMCP
 - HTTPX
 - Tenacity
 - Confluent Kafka
 - Pydantic Settings
+- PyJWT (validação do token de entrada e assinatura dos tokens `governed_tool` para o Renegotiation Service)
 - Uvicorn
 - Pytest
 
 ## Responsabilidades
 
-- Expor tools MCP para o runtime do agente.
-- Encapsular chamadas HTTP ao serviço core de renegociação.
+- Expor tools MCP para o runtime do agente — todas exigem um JWT `tool_execution` válido (porta MCP, `8400`) e são autorizadas por uma política de estágio de jornada (ver seção abaixo).
+- Encapsular chamadas HTTP ao serviço core de renegociação, assinando um token `governed_tool` por chamada.
 - Aplicar retry nas chamadas ao serviço de renegociação.
-- Instrumentar toda execução de tool com evento Kafka.
+- Instrumentar toda execução de tool com evento Kafka, incluindo `tenant_id`.
 - Não registrar argumentos sensíveis, como CPF e identificadores de contrato, no payload de auditoria.
 - Manter o agente desacoplado das APIs internas de renegociação.
+
+## Autorização por estágio de jornada
+
+Além do JWT de entrada (assinado pelo `agent-runtime-renegotiation`, `token_use=tool_execution`), cada tool é autorizada por `app/policy.py` de acordo com o `journey_stage` assinado na claim — chamar uma tool fora do estágio permitido é negado (erro na resposta MCP/REST, sem chegar a bater no Renegotiation Service).
+
+| Tool | Estágios permitidos |
+|---|---|
+| `consultar_cliente` | `Started`, `IdentificationPending`, `AuthenticationPending`, `CustomerIdentified`, `ContractSelectionPending`, `ContractSelected`, `EligibilityChecked`, `SimulationParametersPending`, `ProposalAvailable`, `ProposalSelected`, `ConfirmationPending` |
+| `consultar_contratos` | `IdentificationPending`, `CustomerIdentified`, `ContractSelectionPending`, `ContractSelected`, `EligibilityChecked`, `SimulationParametersPending`, `ProposalAvailable`, `ProposalSelected`, `ConfirmationPending` |
+| `consultar_debitos` | `ContractSelected`, `EligibilityChecked`, `SimulationParametersPending`, `ProposalAvailable`, `ProposalSelected`, `ConfirmationPending` |
+| `validar_elegibilidade` | `ContractSelected`, `EligibilityChecked`, `SimulationParametersPending` |
+| `simular_proposta` | `ContractSelected`, `EligibilityChecked`, `SimulationParametersPending` |
+| `confirmar_acordo` | `ProposalSelected`, `ConfirmationPending` — exige também evidência de confirmação explícita (`confirmation_message_id` assinado batendo com a mensagem atual) |
+| `gerar_documento` | `AgreementConfirmed`, `DocumentAvailable`, `Completed` |
+
+> `consultar_contratos` inclui `IdentificationPending` de propósito: o `journey_stage` é assinado uma única vez no início do turno do agente (não a cada chamada de tool), então o encadeamento natural "identificar cliente → listar contratos" no mesmo turno precisa que ambas as tools sejam permitidas a partir do estágio anterior à identificação.
+
+`simular_proposta` e `confirmar_acordo` também derivam uma `Idempotency-Key` determinística a partir do contexto assinado (tenant, conversa, mensagem, versão da jornada, argumentos), usada na chamada ao Renegotiation Service.
 
 ## Tools MCP
 
@@ -115,6 +134,7 @@ Toda execução de tool publica um evento no tópico configurado.
 
 ```json
 {
+  "tenant_id": "00000000-0000-0000-0000-000000000001",
   "tool_name": "consultar_cliente",
   "outcome": "success",
   "correlation_id": "b4f4d4c2f7d94ef0a8e4d8d6f7c2a123"
@@ -139,8 +159,11 @@ O serviço usa `pydantic-settings` com variáveis de ambiente.
 | `DOCS_PORT` | `8401` | Porta da fachada REST/Swagger somente para documentação (ver seção abaixo). |
 | `RENEGOTIATION_SERVICE_BASE_URL` | `http://localhost:9400` | Base URL do serviço core de renegociação. |
 | `RENEGOTIATION_SERVICE_RETRY_ATTEMPTS` | `2` | Tentativas adicionais em chamadas ao serviço de renegociação. |
-| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Bootstrap servers do Kafka. |
+| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:29092` | Bootstrap servers do Kafka. |
 | `KAFKA_TOOL_EVENTS_TOPIC` | `tool.executed` | Tópico de eventos de execução de tools. |
+| `RENEGOTIATION_SERVICE_AUDIENCE` | `renegotiation-service` | Audiência assinada no token enviado ao Renegotiation Service. |
+| `INTERNAL_AUTH_ENABLED` | `true` | Se `false`, as tools MCP não exigem JWT de entrada (uso local/teste). |
+| `INTERNAL_AUTH_SIGNING_KEY` | (vazio) | Chave HS256 usada para validar o token de entrada (`agent-runtime-renegotiation`) e assinar o token `governed_tool` enviado ao Renegotiation Service. Obrigatória com auth habilitada. |
 
 Exemplo:
 
@@ -148,18 +171,20 @@ Exemplo:
 export MCP_HOST="0.0.0.0"
 export MCP_PORT="8400"
 export RENEGOTIATION_SERVICE_BASE_URL="http://localhost:9400"
-export KAFKA_BOOTSTRAP_SERVERS="localhost:9092"
+export KAFKA_BOOTSTRAP_SERVERS="localhost:29092"
 export KAFKA_TOOL_EVENTS_TOPIC="tool.executed"
+export INTERNAL_AUTH_SIGNING_KEY="<segredo-com-pelo-menos-32-bytes>"
 ```
 
 ## Como executar localmente
 
 ### Pré-requisitos
 
-- Python 3.9+
-- Kafka local em `localhost:9092`
+- Python 3.12
+- Kafka local em `localhost:29092`
 - Serviço core de renegociação disponível em `localhost:9400`
 - Cliente MCP, como o `agent-runtime-renegotiation`, apontando para `http://localhost:8400/mcp`
+- `INTERNAL_AUTH_SIGNING_KEY` com pelo menos 32 bytes, igual ao configurado no `agent-runtime-renegotiation` e no `renegotiation-service`
 
 ### Criar ambiente virtual
 
@@ -211,13 +236,21 @@ http://localhost:8401/docs
 
 MCP não tem uma superfície OpenAPI própria — é um protocolo JSON-RPC-like sobre streamable-HTTP, não REST. Essa fachada existe só para permitir explorar/testar as tools com uma UI; nenhum cliente do workspace a consome (`agent-runtime-renegotiation` fala MCP em `:8400/mcp`, não REST).
 
+`GET /health/live` e `GET /health/ready` também são expostos na porta REST (`:8401`), não na porta MCP — `/health/ready` verifica a chave de assinatura, o Kafka e o Renegotiation Service.
+
 ## Testes
 
 ```bash
-pytest
+python -m pytest
 ```
 
+> Use `python -m pytest`, não o script `pytest` isolado — sem o `python -m`, o diretório do projeto não entra no `sys.path` e a suíte inteira falha com `ModuleNotFoundError: No module named 'app'` (é exatamente por isso que o workflow de CI usa `python -m pytest`).
+
 O `pyproject.toml` aponta os testes para a pasta `tests` e usa `asyncio_mode = auto`.
+
+## CI
+
+`.github/workflows/ci.yml` roda `pip install`/`python -m pytest` a cada push/PR para `master`. `confluent-kafka` tem wheel pronta para `manylinux_2_28_x86_64`/cp312, então não precisa de pacotes de sistema extras no runner.
 
 ## Estrutura
 
@@ -231,15 +264,22 @@ O `pyproject.toml` aponta os testes para a pasta `tests` e usa `asyncio_mode = a
 │   ├── logging_setup.py
 │   ├── main.py
 │   ├── mcp_server.py
-│   └── renegotiation_client.py
+│   ├── platform.py
+│   ├── policy.py
+│   ├── renegotiation_client.py
+│   └── rest_api.py
 ├── tests
 │   ├── test_mcp_server_integration.py
+│   ├── test_policy.py
 │   ├── test_publisher.py
 │   ├── test_renegotiation_client.py
+│   ├── test_rest_api.py
 │   └── test_tools.py
 ├── requirements.txt
 ├── requirements-dev.txt
 ├── pyproject.toml
+├── Dockerfile
+├── .github/workflows/ci.yml
 └── tool-service-renegotiation.pyproj
 ```
 
@@ -259,6 +299,7 @@ Recebe eventos `tool.executed` para observabilidade e auditoria de execução da
 
 ## Resiliência e segurança
 
+- Toda tool exige um JWT `tool_execution` válido de entrada, e cada chamada ao Renegotiation Service é assinada com um token `governed_tool` próprio (ver "Autorização por estágio de jornada" acima).
 - Chamadas ao serviço core usam retry com espera fixa curta.
 - Quando as tentativas esgotam, o client lança `RenegotiationServiceUnavailableError`.
 - Logs evitam imprimir URLs de erro, pois podem conter CPF ou identificadores sensíveis.
@@ -267,8 +308,6 @@ Recebe eventos `tool.executed` para observabilidade e auditoria de execução da
 
 ## Próximos passos sugeridos
 
-- Adicionar Dockerfile e docker-compose local.
 - Documentar contrato do serviço core de renegociação.
 - Criar mocks locais para os endpoints `/clients`, `/contracts`, `/simulations` e `/agreements`.
-- Adicionar health check para Kafka e Renegotiation Service.
-- Adicionar pipeline CI com testes e análise estática.
+- Análise estática no CI (hoje o workflow só roda a suíte de testes).
