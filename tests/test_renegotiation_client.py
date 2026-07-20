@@ -14,7 +14,9 @@ def make_client(retry_attempts: int = 1) -> RenegotiationServiceClient:
     settings = Settings(
         renegotiation_service_base_url=BASE_URL,
         renegotiation_service_retry_attempts=retry_attempts,
-        internal_auth_signing_key="test-only-internal-auth-signing-key-32-bytes-min",
+        internal_auth_outbound_secrets={
+            "renegotiation-service": "test-only-outbound-secret-for-renegotiation-service-32b"
+        },
     )
     return RenegotiationServiceClient(settings)
 
