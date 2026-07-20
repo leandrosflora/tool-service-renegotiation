@@ -51,8 +51,18 @@ def build_app():
     @rest_api.get("/health/ready", include_in_schema=False)
     async def health_ready() -> JSONResponse:
         failures: list[str] = []
-        if settings.internal_auth_enabled and not settings.internal_auth_signing_key:
-            failures.append("internal_auth_signing_key_missing")
+        if settings.internal_auth_enabled:
+            outbound_secret = settings.internal_auth_outbound_secrets.get(
+                settings.renegotiation_service_audience
+            )
+            if not outbound_secret or len(outbound_secret.encode("utf-8")) < 32:
+                failures.append(
+                    f"internal_auth_outbound_secret_missing:{settings.renegotiation_service_audience}"
+                )
+            inbound_caller = "agent-runtime-renegotiation"
+            inbound_secret = settings.internal_auth_inbound_secrets.get(inbound_caller)
+            if not inbound_secret or len(inbound_secret.encode("utf-8")) < 32:
+                failures.append(f"internal_auth_inbound_secret_missing:{inbound_caller}")
         try:
             await asyncio.to_thread(producer.list_topics, timeout=1)
         except Exception:
