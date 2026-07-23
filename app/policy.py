@@ -25,6 +25,15 @@ READ_TOOL_STAGES: dict[str, set[str]] = {
         "ProposalAvailable",
         "ProposalSelected",
         "ConfirmationPending",
+        # conversation-orchestrator's JourneyStageTransitions now allows HandoffRequested ->
+        # IdentificationPending on a fresh RequestedRenegotiation trigger, so a customer whose
+        # conversation was previously handed off can be picked back up by the bot if no human ever
+        # took over. That reopening turn is still signed with the *old* journey_stage
+        # (HandoffRequested) since the stage claim reflects the turn's start, not the transition
+        # that will be persisted after it completes - without this, consultar_cliente would always
+        # be denied on that exact turn, the agent would fail to look the customer up, and would
+        # likely recommend handoff again, permanently re-locking the conversation.
+        "HandoffRequested",
     },
     "consultar_contratos": {
         # IdentificationPending is included alongside CustomerIdentified onward because the
@@ -45,6 +54,9 @@ READ_TOOL_STAGES: dict[str, set[str]] = {
         "ProposalAvailable",
         "ProposalSelected",
         "ConfirmationPending",
+        # Same reasoning as consultar_cliente above: lets the same-turn identify+list-contracts
+        # chain succeed on the turn that reopens a previously handed-off conversation.
+        "HandoffRequested",
     },
     "consultar_debitos": {
         "ContractSelected",

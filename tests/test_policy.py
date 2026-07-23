@@ -98,6 +98,27 @@ def test_consultar_contratos_is_denied_before_identification_starts(
         policy.authorize_tool("consultar_contratos", {"client_id": "client-1"})
 
 
+def test_consultar_cliente_and_contratos_allowed_from_handoff_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # conversation-orchestrator's JourneyStageTransitions allows HandoffRequested ->
+    # IdentificationPending on a fresh renegotiation request, so a customer can be picked back up
+    # by the bot if no human ever took over. The reopening turn is still signed with the stage the
+    # conversation was stuck in (HandoffRequested), so consultar_cliente/consultar_contratos must
+    # not be denied here or the agent could never look the customer up again.
+    monkeypatch.setattr(
+        policy,
+        "current_execution_context",
+        lambda: _context(stage="HandoffRequested"),
+    )
+
+    client_decision = policy.authorize_tool("consultar_cliente", {"cpf": "11111111111"})
+    contracts_decision = policy.authorize_tool("consultar_contratos", {"client_id": "client-1"})
+
+    assert client_decision.context.journey_stage == "HandoffRequested"
+    assert contracts_decision.context.journey_stage == "HandoffRequested"
+
+
 def test_simulation_key_is_deterministic(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         policy,
