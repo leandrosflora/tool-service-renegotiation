@@ -85,13 +85,32 @@ def test_consultar_contratos_is_allowed_in_same_turn_as_identification(
     assert decision.context.journey_stage == "IdentificationPending"
 
 
-def test_consultar_contratos_is_denied_before_identification_starts(
+def test_consultar_contratos_is_allowed_in_same_turn_as_a_brand_new_conversation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A brand new conversation's very first turn is signed with Started, not IdentificationPending
+    # (conversation-orchestrator no longer transitions through IdentificationPending before
+    # invoking the agent - that was JourneyTriggerClassifier's job, removed by
+    # generalize-orchestrator-for-multi-agent). Without Started here, a customer's first message
+    # could never chain "identify -> list contracts" in one turn.
+    monkeypatch.setattr(
+        policy,
+        "current_execution_context",
+        lambda: _context(stage="Started"),
+    )
+
+    decision = policy.authorize_tool("consultar_contratos", {"client_id": "client-1"})
+
+    assert decision.context.journey_stage == "Started"
+
+
+def test_consultar_contratos_is_denied_once_the_agreement_is_confirmed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         policy,
         "current_execution_context",
-        lambda: _context(stage="Started"),
+        lambda: _context(stage="AgreementConfirmed"),
     )
 
     with pytest.raises(policy.ToolPolicyDeniedError, match="not allowed"):
@@ -101,11 +120,13 @@ def test_consultar_contratos_is_denied_before_identification_starts(
 def test_consultar_cliente_and_contratos_allowed_from_handoff_requested(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # conversation-orchestrator's JourneyStageTransitions allows HandoffRequested ->
-    # IdentificationPending on a fresh renegotiation request, so a customer can be picked back up
-    # by the bot if no human ever took over. The reopening turn is still signed with the stage the
-    # conversation was stuck in (HandoffRequested), so consultar_cliente/consultar_contratos must
-    # not be denied here or the agent could never look the customer up again.
+    # conversation-orchestrator resets a conversation's State to a clean slate before calling the
+    # agent whenever it was stuck in HandoffRequested (see IngestMessageUseCase.cs), rather than
+    # signing the literal "HandoffRequested" journey_stage claim - but the turn that recovers a
+    # conversation from an *older*, already-persisted HandoffRequested checkpoint can still be
+    # signed with it (e.g. a retried/duplicate request racing the reset). consultar_cliente/
+    # consultar_contratos must not be denied in that case or the agent could never look the
+    # customer up again.
     monkeypatch.setattr(
         policy,
         "current_execution_context",
@@ -117,6 +138,42 @@ def test_consultar_cliente_and_contratos_allowed_from_handoff_requested(
 
     assert client_decision.context.journey_stage == "HandoffRequested"
     assert contracts_decision.context.journey_stage == "HandoffRequested"
+
+
+def test_consultar_debitos_and_elegibilidade_allowed_in_same_turn_as_a_brand_new_conversation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Same reasoning as consultar_contratos above, one hop further: a single-contract customer's
+    # very first message (signed with Started, not IdentificationPending - see above) should be
+    # able to reach eligibility in the same turn as identification, not require a second customer
+    # message just to answer a yes/no eligibility question - eligibility must be automatic and
+    # transparent, never something the customer has to ask for.
+    monkeypatch.setattr(
+        policy,
+        "current_execution_context",
+        lambda: _context(stage="Started"),
+    )
+
+    debts_decision = policy.authorize_tool("consultar_debitos", {"contract_id": "contract-1"})
+    eligibility_decision = policy.authorize_tool("validar_elegibilidade", {"contract_id": "contract-1"})
+
+    assert debts_decision.context.journey_stage == "Started"
+    assert eligibility_decision.context.journey_stage == "Started"
+
+
+def test_consultar_debitos_and_elegibilidade_denied_once_the_agreement_is_confirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        policy,
+        "current_execution_context",
+        lambda: _context(stage="AgreementConfirmed"),
+    )
+
+    with pytest.raises(policy.ToolPolicyDeniedError, match="not allowed"):
+        policy.authorize_tool("consultar_debitos", {"contract_id": "contract-1"})
+    with pytest.raises(policy.ToolPolicyDeniedError, match="not allowed"):
+        policy.authorize_tool("validar_elegibilidade", {"contract_id": "contract-1"})
 
 
 def test_simulation_key_is_deterministic(monkeypatch: pytest.MonkeyPatch) -> None:

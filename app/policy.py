@@ -25,26 +25,31 @@ READ_TOOL_STAGES: dict[str, set[str]] = {
         "ProposalAvailable",
         "ProposalSelected",
         "ConfirmationPending",
-        # conversation-orchestrator's JourneyStageTransitions now allows HandoffRequested ->
-        # IdentificationPending on a fresh RequestedRenegotiation trigger, so a customer whose
-        # conversation was previously handed off can be picked back up by the bot if no human ever
-        # took over. That reopening turn is still signed with the *old* journey_stage
-        # (HandoffRequested) since the stage claim reflects the turn's start, not the transition
-        # that will be persisted after it completes - without this, consultar_cliente would always
-        # be denied on that exact turn, the agent would fail to look the customer up, and would
-        # likely recommend handoff again, permanently re-locking the conversation.
+        # conversation-orchestrator resets a stuck conversation's State to a clean slate before
+        # calling the agent whenever it was persisted as HandoffRequested (see
+        # IngestMessageUseCase.cs), so a customer whose conversation was previously handed off can
+        # be picked back up by the bot if no human ever took over. An older, already-persisted
+        # HandoffRequested checkpoint can still reach here in edge cases (e.g. a retried/duplicate
+        # request racing the reset) - without this, consultar_cliente would be denied on that turn,
+        # the agent would fail to look the customer up, and would likely recommend handoff again,
+        # permanently re-locking the conversation.
         "HandoffRequested",
     },
     "consultar_contratos": {
-        # IdentificationPending is included alongside CustomerIdentified onward because the
-        # journey_stage claim is signed once per agent turn (see agent-runtime-renegotiation's
-        # tool_service.py) and never advances mid-turn - the orchestrator only persists the
-        # CustomerIdentified transition after the whole turn completes. Without it, the natural
-        # same-turn chain "consultar_cliente identifies them -> consultar_contratos lists their
-        # contracts" is always denied on the second call, since the stage at signing time still
-        # reflects the turn's start. consultar_contratos itself requires a client_id that can
-        # only come from a consultar_cliente call already made from this stage, so this doesn't
-        # weaken the identification requirement - it just lets both calls land in one turn.
+        # Started is included alongside CustomerIdentified onward because the journey_stage claim
+        # is signed once per agent turn (see agent-runtime-renegotiation's tool_service.py) and
+        # never advances mid-turn - a brand new conversation's very first turn is signed with
+        # Started (conversation-orchestrator no longer transitions Started -> IdentificationPending
+        # before invoking the agent; that was JourneyTriggerClassifier's job, removed by
+        # generalize-orchestrator-for-multi-agent), so without Started here the natural same-turn
+        # chain "consultar_cliente identifies them -> consultar_contratos lists their contracts" is
+        # always denied on a customer's very first message, forcing an unnecessary extra round
+        # trip. consultar_contratos itself requires a client_id that can only come from a
+        # consultar_cliente call already made from this stage, so this doesn't weaken the
+        # identification requirement - it just lets both calls land in one turn.
+        # IdentificationPending is kept for backward compatibility even though nothing produces it
+        # as a milestone today - harmless to allow, costs nothing to leave in the set.
+        "Started",
         "IdentificationPending",
         "CustomerIdentified",
         "ContractSelectionPending",
@@ -59,17 +64,36 @@ READ_TOOL_STAGES: dict[str, set[str]] = {
         "HandoffRequested",
     },
     "consultar_debitos": {
+        # Started/IdentificationPending/CustomerIdentified/ContractSelectionPending included for
+        # the same reason as consultar_contratos above: the journey_stage claim is fixed at
+        # turn-start, so without these a single-contract customer's very first message could never
+        # reach debts/eligibility in the same turn as identification - eligibility must be an
+        # automatic, transparent check, never something the customer has to explicitly ask for and
+        # wait a whole extra turn on. consultar_debitos requires a contract_id that can only
+        # legitimately come from a consultar_contratos call already made from this same stage, so
+        # this doesn't weaken the requirement, it just lets the whole chain land in one turn.
+        "Started",
+        "IdentificationPending",
+        "CustomerIdentified",
+        "ContractSelectionPending",
         "ContractSelected",
         "EligibilityChecked",
         "SimulationParametersPending",
         "ProposalAvailable",
         "ProposalSelected",
         "ConfirmationPending",
+        "HandoffRequested",
     },
     "validar_elegibilidade": {
+        # Same reasoning as consultar_debitos above.
+        "Started",
+        "IdentificationPending",
+        "CustomerIdentified",
+        "ContractSelectionPending",
         "ContractSelected",
         "EligibilityChecked",
         "SimulationParametersPending",
+        "HandoffRequested",
     },
     "gerar_documento": {
         "AgreementConfirmed",
