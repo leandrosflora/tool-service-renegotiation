@@ -103,6 +103,19 @@ READ_TOOL_STAGES: dict[str, set[str]] = {
 }
 
 SIMULATION_STAGES = {
+    # Started/IdentificationPending/CustomerIdentified/ContractSelectionPending included for the
+    # same reason as consultar_debitos/validar_elegibilidade above: the journey_stage claim is
+    # fixed at turn-start, so without these a single-contract customer's very first message could
+    # never reach a simulation in the same turn as identification+eligibility - the agent is now
+    # expected to proactively offer a simulation as soon as eligibility is confirmed, not wait for
+    # the customer to ask, so that whole chain has to be able to land in one turn.
+    # simular_proposta requires a contract_id that can only legitimately come from a
+    # consultar_contratos call already made from this same stage, so this doesn't weaken the
+    # requirement, it just lets the chain land in one turn.
+    "Started",
+    "IdentificationPending",
+    "CustomerIdentified",
+    "ContractSelectionPending",
     "ContractSelected",
     "EligibilityChecked",
     "SimulationParametersPending",

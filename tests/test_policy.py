@@ -176,6 +176,39 @@ def test_consultar_debitos_and_elegibilidade_denied_once_the_agreement_is_confir
         policy.authorize_tool("validar_elegibilidade", {"contract_id": "contract-1"})
 
 
+def test_simular_proposta_allowed_in_same_turn_as_a_brand_new_conversation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Same reasoning as consultar_debitos/validar_elegibilidade above, one hop further: the agent
+    # is now expected to proactively offer a simulation as soon as eligibility is confirmed
+    # (see agent-runtime-renegotiation's prompts.py), so a single-contract customer's very first
+    # message must be able to reach a simulation in the same turn too, not just eligibility.
+    monkeypatch.setattr(
+        policy,
+        "current_execution_context",
+        lambda: _context(stage="Started"),
+    )
+    arguments = {"contract_id": "contract-1", "installments": 12, "discount_percentage": 10.0}
+
+    decision = policy.authorize_tool("simular_proposta", arguments)
+
+    assert decision.context.journey_stage == "Started"
+
+
+def test_simular_proposta_denied_once_the_agreement_is_confirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        policy,
+        "current_execution_context",
+        lambda: _context(stage="AgreementConfirmed"),
+    )
+    arguments = {"contract_id": "contract-1", "installments": 12, "discount_percentage": 10.0}
+
+    with pytest.raises(policy.ToolPolicyDeniedError, match="not allowed"):
+        policy.authorize_tool("simular_proposta", arguments)
+
+
 def test_simulation_key_is_deterministic(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         policy,
